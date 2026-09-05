@@ -30,6 +30,14 @@ class Lander:
 
     def land_one(self, path: Path) -> dict:
         checksum = sha256_file(path)
+        already = self.store.query("SELECT status, file_id FROM inbox_files WHERE sha256=?", (checksum,))
+        if already:
+            return {
+                "status": "duplicate",
+                "path": str(path),
+                "prior": already[0]["status"],
+                "file_id": already[0]["file_id"],
+            }
         now = datetime.now(UTC).isoformat()
         try:
             logical = parse_ndjson(path)
