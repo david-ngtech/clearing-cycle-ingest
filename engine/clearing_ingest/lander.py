@@ -28,8 +28,18 @@ class Lander:
             return []
         return sorted(self.inbox.rglob("*.ndjson"))
 
+    def _dead_dest(self, path: Path) -> Path:
+        try:
+            rel = path.relative_to(self.inbox)
+        except ValueError:
+            rel = Path(path.name)
+        dest = self.dead / rel
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        return dest
+
     def land_one(self, path: Path) -> dict:
         checksum = sha256_file(path)
+        size = path.stat().st_size
         already = self.store.query("SELECT status, file_id FROM inbox_files WHERE sha256=?", (checksum,))
         if already:
             return {
@@ -39,25 +49,77 @@ class Lander:
                 "file_id": already[0]["file_id"],
             }
         now = datetime.now(UTC).isoformat()
+        logical = None
         try:
             logical = parse_ndjson(path)
+            accepted = self.store.query(
+                "SELECT status FROM inbox_files WHERE file_id=? AND status='accepted'",
+                (logical.header.file_id,),
+            )
+            if accepted:
+                return {
+                    "status": "duplicate",
+                    "path": str(path),
+                    "prior": "accepted",
+                    "file_id": logical.header.file_id,
+                    "cycle_date": logical.header.cycle_date,
+                    "cycle_no": logical.header.cycle_no,
+                    "endpoint_id": logical.header.endpoint_id,
+                }
             validate_logical(logical)
         except ContractError as exc:
-            dest = self.dead / path.name
+            dest = self._dead_dest(path)
             shutil.copy2(path, dest)
-            self.store.insert_dead_letter(str(dest), exc.reason, exc.evidence, now)
-            self.store.execute(
-                """INSERT INTO inbox_files(path, sha256, status, reason)
-                   VALUES(?,?,?,?)""",
-                (str(path), checksum, "rejected", exc.reason),
+            header = logical.header if logical is not None else None
+            self.store.insert_dead_letter(
+                str(dest),
+                exc.reason,
+                exc.evidence,
+                now,
+                cycle_date=header.cycle_date if header else None,
+                cycle_no=header.cycle_no if header else None,
+                endpoint_id=header.endpoint_id if header else None,
+                file_id=header.file_id if header else None,
             )
-            return {"status": "rejected", "path": str(path), "reason": exc.reason, "evidence": exc.evidence}
+            self.store.execute(
+                """INSERT INTO inbox_files(path, sha256, status, reason, file_id, cycle_date, cycle_no, endpoint_id, bytes)
+                   VALUES(?,?,?,?,?,?,?,?,?)""",
+                (
+                    str(path),
+                    checksum,
+                    "rejected",
+                    exc.reason,
+                    header.file_id if header else None,
+                    header.cycle_date if header else None,
+                    header.cycle_no if header else None,
+                    header.endpoint_id if header else None,
+                    size,
+                ),
+            )
+            return {
+                "status": "rejected",
+                "path": str(path),
+                "reason": exc.reason,
+                "evidence": exc.evidence,
+                "cycle_date": header.cycle_date if header else None,
+                "cycle_no": header.cycle_no if header else None,
+                "endpoint_id": header.endpoint_id if header else None,
+            }
 
         header = logical.header
         self.store.execute(
-            """INSERT INTO inbox_files(path, sha256, status, file_id, cycle_date, cycle_no, endpoint_id)
-               VALUES(?,?,?,?,?,?,?)""",
-            (str(path), checksum, "accepted", header.file_id, header.cycle_date, header.cycle_no, header.endpoint_id),
+            """INSERT INTO inbox_files(path, sha256, status, file_id, cycle_date, cycle_no, endpoint_id, bytes)
+               VALUES(?,?,?,?,?,?,?,?)""",
+            (
+                str(path),
+                checksum,
+                "accepted",
+                header.file_id,
+                header.cycle_date,
+                header.cycle_no,
+                header.endpoint_id,
+                size,
+            ),
         )
         return {
             "status": "accepted",

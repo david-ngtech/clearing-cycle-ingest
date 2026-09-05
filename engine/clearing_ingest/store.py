@@ -72,14 +72,20 @@ class Store:
               cycle_date TEXT,
               cycle_no INTEGER,
               endpoint_id TEXT,
-              reason TEXT
+              reason TEXT,
+              bytes INTEGER
             );
             CREATE TABLE IF NOT EXISTS dead_letters (
               id INTEGER PRIMARY KEY AUTOINCREMENT,
               path TEXT NOT NULL,
               reason TEXT NOT NULL,
               evidence TEXT NOT NULL,
-              created_at TEXT NOT NULL
+              created_at TEXT NOT NULL,
+              cycle_date TEXT,
+              cycle_no INTEGER,
+              endpoint_id TEXT,
+              file_id TEXT,
+              replayed_at TEXT
             );
             CREATE TABLE IF NOT EXISTS clearing_rows (
               cycle_date TEXT NOT NULL,
@@ -101,7 +107,24 @@ class Store:
             );
             """
         )
+        self._migrate()
         self._conn.commit()
+
+    def _migrate(self) -> None:
+        inbox_cols = {r[1] for r in self._conn.execute("PRAGMA table_info(inbox_files)")}
+        if "bytes" not in inbox_cols:
+            self._conn.execute("ALTER TABLE inbox_files ADD COLUMN bytes INTEGER")
+        dead_cols = {r[1] for r in self._conn.execute("PRAGMA table_info(dead_letters)")}
+        for col, typ in (
+            ("cycle_date", "TEXT"),
+            ("cycle_no", "INTEGER"),
+            ("endpoint_id", "TEXT"),
+            ("file_id", "TEXT"),
+            ("replayed_at", "TEXT"),
+        ):
+            if col not in dead_cols:
+                self._conn.execute(f"ALTER TABLE dead_letters ADD COLUMN {col} {typ}")
+        self._conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS inbox_files_sha256 ON inbox_files(sha256)")
 
     def seed_catalog(self) -> None:
         with self._lock:
@@ -154,10 +177,23 @@ class Store:
     def query(self, sql: str, args: tuple = ()) -> list[dict[str, Any]]:
         return self._rows(sql, args)
 
-    def insert_dead_letter(self, path: str, reason: str, evidence: dict, created_at: str) -> None:
+    def insert_dead_letter(
+        self,
+        path: str,
+        reason: str,
+        evidence: dict,
+        created_at: str,
+        *,
+        cycle_date: str | None = None,
+        cycle_no: int | None = None,
+        endpoint_id: str | None = None,
+        file_id: str | None = None,
+    ) -> None:
         with self._lock:
             self._conn.execute(
-                "INSERT INTO dead_letters(path, reason, evidence, created_at) VALUES(?,?,?,?)",
-                (path, reason, json.dumps(evidence), created_at),
+                """INSERT INTO dead_letters(
+                     path, reason, evidence, created_at, cycle_date, cycle_no, endpoint_id, file_id
+                   ) VALUES(?,?,?,?,?,?,?,?)""",
+                (path, reason, json.dumps(evidence), created_at, cycle_date, cycle_no, endpoint_id, file_id),
             )
             self._conn.commit()

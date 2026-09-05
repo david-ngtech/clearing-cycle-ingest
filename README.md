@@ -52,11 +52,11 @@ inbox/*.ndjson          GET /refs/fx          GET /refs/bins/{bin}
 
 ## What the fabric actually does
 
-1. **Catalog** — five sources with contract, cadence, owner. Required endpoints come from the member registry, not from whatever happened to land.
-2. **Land** — fingerprint the pack (`sha256`). Parse NDJSON. Reject to dead-letter when header/trailer `file_id` diverge, trailer count is wrong, `DE 71` has a gap, or the amount hash fails.
+1. **Catalog** — five sources with contract, cadence, owner, and a watermark. Required endpoints come from the member registry, not from whatever happened to land.
+2. **Land** — fingerprint the pack (`sha256`). Parse NDJSON. Reject to dead-letter when header/trailer `file_id` diverge, trailer count is wrong, `DE 71` has a gap, or the amount hash fails. A replay handle writes a repaired pack for that endpoint.
 3. **Merge** — insert with `INSERT OR IGNORE` on `(cycle_date, cycle_no, endpoint_id, file_id, message_no)`. Re-drops and parquet backfills do not double the lake. FX and BIN stamp USD cents and product as-of the cycle date.
-4. **Close** — `open` until something lands, `partial` while a required endpoint is missing, `closed` only when every required endpoint has a valid file. A pack after close is `late`.
-5. **Board** — the console shows the cycle burn-down, the source catalog, inbox accepts/rejects, and dead letters.
+4. **Close** — `open` until something lands, `partial` while a required endpoint is missing, `closed` only when every required endpoint has a valid file. A retransmission after close is `late`.
+5. **Board** — the console shows the cycle burn-down, per-endpoint status, source watermarks, inbox accepts/rejects, and dead letters.
 
 Seed on boot: today’s cycles 1–3 in the inbox (one complete, one missing an endpoint, one poison file), cycle 4 not dropped, and all four of yesterday’s cycles as parquet.
 
@@ -83,7 +83,7 @@ make dev
 make test
 ```
 
-**Run inbox** on the board re-walks leftover drops. **Drop late file** writes one more pack after a cycle has already moved, so you can see `late` instead of a silent overwrite.
+**Run inbox** re-walks leftover drops and skips anything already fingerprinted. **Drop late file** writes a retransmission (`-R2`) against a closed cycle. **Replay** on a dead letter writes a repaired pack for that endpoint and lands it.
 
 ## Data
 

@@ -96,7 +96,7 @@ def replay(dead_id: int) -> dict[str, Any]:
     result = pipeline.replay_dead_letter(dead_id)
     if result["status"] == "missing":
         raise HTTPException(status_code=404, detail="Dead letter not found")
-    return result
+    return {**result, "cycles": pipeline.snapshot()["cycles"]}
 
 
 @app.get("/stream")

@@ -59,14 +59,24 @@ def write_cycle_parquet(cycle_date: str, cycle_no: int, lake: Path = LAKE_DIR) -
 
 def seed_yesterday_lake(lake: Path = LAKE_DIR) -> list[Path]:
     day = yesterday()
-    return [write_cycle_parquet(day, cycle_no, lake) for cycle_no in (1, 2, 3, 4)]
+    paths: list[Path] = []
+    for cycle_no in (1, 2, 3, 4):
+        dest = partition_dir(day, cycle_no, lake) / "part-000.parquet"
+        if dest.exists():
+            paths.append(dest)
+            continue
+        paths.append(write_cycle_parquet(day, cycle_no, lake))
+    return paths
 
 
-def read_partitions(lake: Path = LAKE_DIR) -> list[dict]:
+def read_partitions(lake: Path = LAKE_DIR, cycle_date: str | None = None) -> list[dict]:
     if not lake.exists():
         return []
     rows: list[dict] = []
     for path in sorted(lake.rglob("*.parquet")):
         table = pq.read_table(path)
-        rows.extend(table.to_pylist())
+        for row in table.to_pylist():
+            if cycle_date and row["cycle_date"] != cycle_date:
+                continue
+            rows.append(row)
     return rows
