@@ -1,21 +1,21 @@
 from __future__ import annotations
 
-import json
 import random
 import uuid
-from datetime import UTC, date, datetime, timedelta
+from datetime import date, timedelta
 from pathlib import Path
 
 from clearing_ingest.catalog import ENDPOINTS, MEMBERS
-from clearing_ingest.config import CYCLE_NOS, INBOX_DIR
+from clearing_ingest.config import INBOX_DIR
 from clearing_ingest.filespec import ClearingMessage, FileHeader, FileTrailer, LogicalFile
 
 CURRENCIES = {"US": "USD", "GB": "GBP", "DE": "EUR"}
 BINS = ["541275", "222988", "414720", "526610", "454313", "510875"]
 
 
-def _file_id(cycle_date: str, cycle_no: int, endpoint_id: str) -> str:
-    return f"IPM-{cycle_date.replace('-', '')}-C{cycle_no:02d}-{endpoint_id}"
+def _file_id(cycle_date: str, cycle_no: int, endpoint_id: str, retransmission: int = 1) -> str:
+    base = f"IPM-{cycle_date.replace('-', '')}-C{cycle_no:02d}-{endpoint_id}"
+    return f"{base}-R{retransmission}" if retransmission > 1 else base
 
 
 def build_logical_file(
@@ -26,13 +26,14 @@ def build_logical_file(
     member_id: str,
     n_messages: int = 12,
     fault: str | None = None,
+    retransmission: int = 1,
     rng: random.Random | None = None,
 ) -> LogicalFile:
-    rng = rng or random.Random(f"{cycle_date}-{cycle_no}-{endpoint_id}")
+    rng = rng or random.Random(f"{cycle_date}-{cycle_no}-{endpoint_id}-{retransmission}")
     member = next(m for m in MEMBERS if m.id == member_id)
     currency = CURRENCIES[member.country]
-    file_id = _file_id(cycle_date, cycle_no, endpoint_id)
-    created = datetime.now(UTC).isoformat()
+    file_id = _file_id(cycle_date, cycle_no, endpoint_id, retransmission)
+    created = f"{cycle_date}T{cycle_no:02d}:{retransmission:02d}:00+00:00"
     messages: list[ClearingMessage] = []
     for i in range(1, n_messages + 1):
         messages.append(
@@ -85,6 +86,7 @@ def drop_cycle_inbox(
     *,
     skip_endpoints: set[str] | None = None,
     faults: dict[str, str] | None = None,
+    retransmission: int = 1,
     inbox: Path = INBOX_DIR,
 ) -> list[Path]:
     skip_endpoints = skip_endpoints or set()
@@ -99,8 +101,10 @@ def drop_cycle_inbox(
             endpoint_id=endpoint.id,
             member_id=endpoint.member_id,
             fault=faults.get(endpoint.id),
+            retransmission=retransmission,
         )
-        path = inbox / cycle_date / f"C{cycle_no:02d}" / f"{endpoint.id}.ndjson"
+        name = f"{endpoint.id}.ndjson" if retransmission == 1 else f"{endpoint.id}-R{retransmission}.ndjson"
+        path = inbox / cycle_date / f"C{cycle_no:02d}" / name
         written.append(write_ndjson(logical, path))
     return written
 
@@ -109,14 +113,29 @@ def today_utc() -> str:
     return date.today().isoformat()
 
 
-def seed_today_inbox() -> list[Path]:
+def seed_today_inbox(inbox: Path = INBOX_DIR) -> list[Path]:
     day = today_utc()
     paths: list[Path] = []
     # Cycle 1: complete. Cycle 2: skip one required endpoint (partial).
     # Cycle 3: one poison file. Cycle 4: not dropped yet (open).
-    paths += drop_cycle_inbox(day, 1)
-    paths += drop_cycle_inbox(day, 2, skip_endpoints={"E-3310"})
-    paths += drop_cycle_inbox(day, 3, faults={"E-1102": "header_trailer_mismatch"})
+    specs: list[tuple[int, set[str], dict[str, str]]] = [
+        (1, set(), {}),
+        (2, {"E-3310"}, {}),
+        (3, set(), {"E-1102": "header_trailer_mismatch"}),
+    ]
+    for cycle_no, skip, faults in specs:
+        dest = inbox / day / f"C{cycle_no:02d}"
+        existing = sorted(dest.glob("*.ndjson")) if dest.exists() else []
+        if existing:
+            paths.extend(existing)
+            continue
+        paths += drop_cycle_inbox(
+            day,
+            cycle_no,
+            skip_endpoints=skip,
+            faults=faults,
+            inbox=inbox,
+        )
     return paths
 
 

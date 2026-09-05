@@ -16,7 +16,16 @@ const statusTone: Record<string, string> = {
   late: "text-rose-300",
   accepted: "text-teal-300",
   rejected: "text-rose-300",
+  landed: "text-teal-300",
+  missing: "text-amber-300",
+  duplicate: "text-muted-foreground",
 };
+
+function formatBytes(n: number): string {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+}
 
 export function IngestConsole() {
   const [snap, setSnap] = useState<Snapshot | null>(null);
@@ -50,17 +59,29 @@ export function IngestConsole() {
 
   const dropLate = async () => {
     if (!snap) return;
-    const closed = snap.cycles.find((c) => c.status === "closed" || c.status === "partial");
-    const endpoint = closed?.missing[0] ?? "E-9407";
-    const cycle = closed ?? snap.cycles[0];
+    const closed = snap.cycles.find((c) => c.status === "closed") ?? snap.cycles.find((c) => c.status === "late");
+    if (!closed) return;
     setBusy(true);
     try {
-      await api.late(cycle.cycle_date, cycle.cycle_no, endpoint);
+      await api.late(closed.cycle_date, closed.cycle_no, "E-9407");
       await load();
     } finally {
       setBusy(false);
     }
   };
+
+  const replay = async (deadId: number) => {
+    setBusy(true);
+    try {
+      await api.replay(deadId);
+      await load();
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const rejectRate =
+    snap && snap.inbox_files > 0 ? ((snap.reject_count / snap.inbox_files) * 100).toFixed(0) : "0";
 
   return (
     <div className="mx-auto flex w-full max-w-6xl flex-col gap-5 px-4 py-6 sm:px-6">
@@ -79,7 +100,12 @@ export function IngestConsole() {
           <Button size="sm" onClick={() => void run()} disabled={busy || !snap}>
             Run inbox
           </Button>
-          <Button size="sm" variant="outline" onClick={() => void dropLate()} disabled={busy || !snap}>
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() => void dropLate()}
+            disabled={busy || !snap || !snap.cycles.some((c) => c.status === "closed" || c.status === "late")}
+          >
             Drop late file
           </Button>
         </div>
@@ -95,7 +121,7 @@ export function IngestConsole() {
         <p className="text-sm text-muted-foreground">Loading catalog…</p>
       ) : (
         <>
-          <div className="grid gap-3 sm:grid-cols-3">
+          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
             <Card size="sm">
               <CardHeader>
                 <CardDescription>Clearing rows</CardDescription>
@@ -110,8 +136,14 @@ export function IngestConsole() {
             </Card>
             <Card size="sm">
               <CardHeader>
-                <CardDescription>Today</CardDescription>
-                <CardTitle className="font-mono text-2xl">{snap.today}</CardTitle>
+                <CardDescription>Reject rate</CardDescription>
+                <CardTitle className="font-mono text-2xl">{rejectRate}%</CardTitle>
+              </CardHeader>
+            </Card>
+            <Card size="sm">
+              <CardHeader>
+                <CardDescription>Bytes landed</CardDescription>
+                <CardTitle className="font-mono text-2xl">{formatBytes(snap.bytes_landed)}</CardTitle>
               </CardHeader>
             </Card>
           </div>
@@ -135,24 +167,31 @@ export function IngestConsole() {
                       </div>
                       <CardDescription>
                         Required {cycle.required.length} · landed {cycle.landed.length}
+                        {cycle.missing.length ? ` · missing ${cycle.missing.join(", ")}` : ""}
                       </CardDescription>
                     </CardHeader>
-                    <CardContent className="text-sm">
-                      {cycle.missing.length ? (
-                        <p>Missing: {cycle.missing.join(", ")}</p>
-                      ) : (
-                        <p className="text-teal-300">All required endpoints landed.</p>
-                      )}
+                    <CardContent className="flex flex-wrap gap-1.5">
+                      {(cycle.endpoints ?? []).map((ep) => (
+                        <span
+                          key={ep.id}
+                          className={`rounded-full border border-border px-2 py-0.5 font-mono text-[11px] ${statusTone[ep.status] ?? ""}`}
+                        >
+                          {ep.id}
+                          {ep.required ? "" : " opt"} · {ep.status}
+                        </span>
+                      ))}
                     </CardContent>
                   </Card>
                 ))}
               </div>
             </TabsContent>
-            <TabsContent value="catalog" className="pt-4">
+            <TabsContent value="catalog" className="pt-4 space-y-4">
               <Card>
                 <CardHeader>
                   <CardTitle>Sources</CardTitle>
-                  <CardDescription>Five ingest contracts. Cadence and owner live on the catalog row.</CardDescription>
+                  <CardDescription>
+                    Five ingest contracts. Watermark is the last as-of each source has actually landed.
+                  </CardDescription>
                 </CardHeader>
                 <CardContent>
                   <Table>
@@ -160,7 +199,7 @@ export function IngestConsole() {
                       <TableRow>
                         <TableHead>Source</TableHead>
                         <TableHead>Kind</TableHead>
-                        <TableHead>Cadence</TableHead>
+                        <TableHead>Watermark</TableHead>
                         <TableHead>Owner</TableHead>
                       </TableRow>
                     </TableHeader>
@@ -170,12 +209,41 @@ export function IngestConsole() {
                           <TableCell>
                             <div>{source.name}</div>
                             <div className="text-xs text-muted-foreground">{source.contract}</div>
+                            <div className="text-xs text-muted-foreground">{source.cadence}</div>
                           </TableCell>
                           <TableCell>
                             <Badge variant="outline">{source.kind}</Badge>
                           </TableCell>
-                          <TableCell>{source.cadence}</TableCell>
+                          <TableCell className="font-mono text-xs">{source.watermark ?? "—"}</TableCell>
                           <TableCell>{source.owner}</TableCell>
+                        </TableRow>
+                      ))}
+                    </TableBody>
+                  </Table>
+                </CardContent>
+              </Card>
+              <Card>
+                <CardHeader>
+                  <CardTitle>Endpoints</CardTitle>
+                  <CardDescription>Required destinations must land before a cycle can close.</CardDescription>
+                </CardHeader>
+                <CardContent>
+                  <Table>
+                    <TableHeader>
+                      <TableRow>
+                        <TableHead>Endpoint</TableHead>
+                        <TableHead>Member</TableHead>
+                        <TableHead>City</TableHead>
+                        <TableHead>Required</TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {snap.endpoints.map((ep) => (
+                        <TableRow key={ep.id}>
+                          <TableCell className="font-mono text-xs">{ep.id}</TableCell>
+                          <TableCell>{ep.member_id}</TableCell>
+                          <TableCell>{ep.city}</TableCell>
+                          <TableCell>{ep.required ? "yes" : "optional"}</TableCell>
                         </TableRow>
                       ))}
                     </TableBody>
@@ -187,43 +255,72 @@ export function IngestConsole() {
               <Card>
                 <CardHeader>
                   <CardTitle>Landed and rejected files</CardTitle>
+                  <CardDescription>
+                    {snap.inbox.length
+                      ? `${snap.inbox_files} fingerprints · ${snap.reject_count} rejected`
+                      : "Inbox is empty. Seed writes today’s packs on engine boot."}
+                  </CardDescription>
                 </CardHeader>
                 <CardContent>
-                  <Table>
-                    <TableHeader>
-                      <TableRow>
-                        <TableHead>Status</TableHead>
-                        <TableHead>File</TableHead>
-                        <TableHead>Reason</TableHead>
-                      </TableRow>
-                    </TableHeader>
-                    <TableBody>
-                      {snap.inbox.map((row) => (
-                        <TableRow key={row.id}>
-                          <TableCell className={statusTone[row.status] ?? ""}>{row.status}</TableCell>
-                          <TableCell className="max-w-[280px] truncate font-mono text-xs">
-                            {row.file_id ?? row.path}
-                          </TableCell>
-                          <TableCell className="text-xs">{row.reason ?? "—"}</TableCell>
+                  {snap.inbox.length === 0 ? (
+                    <p className="text-sm text-muted-foreground">No files have been fingerprinted yet.</p>
+                  ) : (
+                    <Table>
+                      <TableHeader>
+                        <TableRow>
+                          <TableHead>Status</TableHead>
+                          <TableHead>File</TableHead>
+                          <TableHead>Reason</TableHead>
                         </TableRow>
-                      ))}
-                    </TableBody>
-                  </Table>
+                      </TableHeader>
+                      <TableBody>
+                        {snap.inbox.map((row) => (
+                          <TableRow key={row.id}>
+                            <TableCell className={statusTone[row.status] ?? ""}>{row.status}</TableCell>
+                            <TableCell className="max-w-[280px] truncate font-mono text-xs">
+                              {row.file_id ?? row.path}
+                            </TableCell>
+                            <TableCell className="text-xs">{row.reason ?? "—"}</TableCell>
+                          </TableRow>
+                        ))}
+                      </TableBody>
+                    </Table>
+                  )}
                 </CardContent>
               </Card>
               <Card>
                 <CardHeader>
                   <CardTitle>Dead letters</CardTitle>
-                  <CardDescription>Contract failures. Replay is a no-op until the pack is repaired.</CardDescription>
+                  <CardDescription>
+                    Contract failures. Replay writes a repaired pack for that endpoint and lands it.
+                  </CardDescription>
                 </CardHeader>
                 <CardContent className="space-y-3 text-sm">
                   {snap.dead_letters.length === 0 ? (
                     <p className="text-muted-foreground">No dead letters.</p>
                   ) : (
                     snap.dead_letters.map((row) => (
-                      <div key={row.id} className="rounded-lg border border-border px-3 py-2">
-                        <p className="font-medium text-rose-300">{row.reason}</p>
-                        <p className="font-mono text-xs text-muted-foreground">{row.path}</p>
+                      <div
+                        key={row.id}
+                        className="flex flex-col gap-2 rounded-lg border border-border px-3 py-2 sm:flex-row sm:items-center sm:justify-between"
+                      >
+                        <div>
+                          <p className="font-medium text-rose-300">{row.reason}</p>
+                          <p className="font-mono text-xs text-muted-foreground">
+                            {row.endpoint_id ?? "?"} · cycle {row.cycle_no ?? "?"} · {row.path}
+                          </p>
+                          {row.replayed_at ? (
+                            <p className="text-xs text-teal-300">Replayed {row.replayed_at}</p>
+                          ) : null}
+                        </div>
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          disabled={busy || !row.endpoint_id}
+                          onClick={() => void replay(row.id)}
+                        >
+                          Replay
+                        </Button>
                       </div>
                     ))
                   )}

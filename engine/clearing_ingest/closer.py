@@ -62,6 +62,18 @@ class CycleCloser:
                 "UPDATE cycles SET status=? WHERE cycle_date=? AND cycle_no=?",
                 (status, cycle_date, cycle_no),
             )
+        by_id = {r["endpoint_id"]: r for r in rows}
+        endpoints = []
+        for ep in self.store.endpoints():
+            row = by_id.get(ep["id"])
+            endpoints.append(
+                {
+                    "id": ep["id"],
+                    "required": bool(ep["required"]),
+                    "status": row["status"] if row else "missing",
+                    "file_id": row["file_id"] if row else None,
+                }
+            )
         return {
             "cycle_date": cycle_date,
             "cycle_no": cycle_no,
@@ -69,6 +81,7 @@ class CycleCloser:
             "required": sorted(required),
             "landed": sorted(landed),
             "missing": missing,
+            "endpoints": endpoints,
         }
 
     def mark_late(self, cycle_date: str, cycle_no: int, endpoint_id: str) -> None:
