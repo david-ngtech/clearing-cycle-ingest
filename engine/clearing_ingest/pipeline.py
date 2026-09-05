@@ -56,15 +56,16 @@ class IngestPipeline:
         }
 
     def run_once(self) -> list[dict[str, Any]]:
+        already_closed = {
+            (row["cycle_date"], row["cycle_no"])
+            for row in self.store.query("SELECT cycle_date, cycle_no, status FROM cycles")
+            if row["status"] in {"closed", "late"}
+        }
         results = []
         for result in self.lander.land_all():
             if result["status"] == "accepted":
                 header_cycle = (result["cycle_date"], result["cycle_no"])
-                prior = self.store.query(
-                    "SELECT status FROM cycles WHERE cycle_date=? AND cycle_no=?",
-                    header_cycle,
-                )
-                was_closed = bool(prior and prior[0]["status"] in {"closed", "late"})
+                was_closed = header_cycle in already_closed
                 inserted = self.merger.merge_messages(
                     cycle_date=result["cycle_date"],
                     cycle_no=result["cycle_no"],
